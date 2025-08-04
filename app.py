@@ -1,56 +1,73 @@
-# app.py
+import os
+from flask import Flask, request, jsonify, render_template
+from azure.core.credentials import AzureKeyCredential
+from azure.ai.textanalytics import TextAnalyticsClient
 
-from flask import Flask, render_template, request
-import nltk
-from nltk.corpus import stopwords
-from nltk.tokenize import word_tokenize, sent_tokenize
+# Initialize Flask App
+app = Flask(__name__)
 
-class Summarizer:
-    def __init__(self):
-        self.stop_words = set(stopwords.words('english'))
+# Get Azure AI Language credentials from environment variables
+# We will set these in Azure App Service configuration later
+language_key = os.environ.get('LANGUAGE_KEY')
+language_endpoint = os.environ.get('LANGUAGE_ENDPOINT')
 
-    def _calculate_sentence_scores(self, text):
-        sentences = sent_tokenize(text)
-        if not sentences:
-            return {}
-            
-        word_freq = {}
-        for word in word_tokenize(text.lower()):
-            if word.isalnum() and word not in self.stop_words:
-                word_freq[word] = word_freq.get(word, 0) + 1
+# Authenticate the client
+text_analytics_client = TextAnalyticsClient(
+    endpoint=language_endpoint,
+    credential=AzureKeyCredential(language_key)
+)
 
-        sentence_scores = {}
-        for sentence in sentences:
-            score = 0
-            for word in word_tokenize(sentence.lower()):
-                if word in word_freq:
-                    score += word_freq[word]
-            sentence_scores[sentence] = score
-        return sentence_scores
-
-    def summarize(self, text, num_sentences=3):
-        if not text.strip():
-            return "Please enter some text to summarize."
-        
-        sentence_scores = self._calculate_sentence_scores(text)
-        summarized_sentences = sorted(sentence_scores, key=sentence_scores.get, reverse=True)
-        return ' '.join(summarized_sentences[:num_sentences])
-
-# --- Flask App Setup ---
-# Tell Flask to look for HTML files in the current folder ('.')
-app = Flask(__name__, template_folder='.') 
-summarizer = Summarizer()
-
-@app.route('/', methods=['GET', 'POST'])
+@app.route('/')
 def index():
-    summary_text = ""
-    original_text = ""
-    if request.method == 'POST':
-        original_text = request.form['raw_text']
-        num_sentences = int(request.form.get('num_sentences', 3))
-        summary_text = summarizer.summarize(original_text, num_sentences)
+    """Renders the frontend HTML page."""
+    return render_template('index.html')
 
-    return render_template('index.html', summary=summary_text, original_text=original_text)
+@app.route('/analyze', methods=['POST'])
+def analyze():
+    """Analyzes the text using Azure AI Language."""
+    try:
+        data = request.get_json()
+        text_to_analyze = data.get('text')
+
+        if not text_to_analyze:
+            return jsonify({"error": "No text provided"}), 400
+
+        documents = [text_to_analyze]
+
+        # 1. Analyze Sentiment
+        sentiment_result = text_analytics_client.analyze_sentiment(documents=documents)[0]
+        sentiment = {
+            "overall": sentiment_result.sentiment,
+            "scores": {
+                "positive": f"{sentiment_result.confidence_scores.positive:.2f}",
+                "neutral": f"{sentiment_result.confidence_scores.neutral:.2f}",
+                "negative": f"{sentiment_result.confidence_scores.negative:.2f}",
+            }
+        }
+
+        # 2. Extract Key Phrases
+        key_phrases_result = text_analytics_client.extract_key_phrases(documents=documents)[0]
+        key_phrases = key_phrases_result.key_phrases if not key_phrases_result.is_error else []
+
+        # 3. Recognize Entities
+        entities_result = text_analytics_client.recognize_entities(documents=documents)[0]
+        entities = [{"text": entity.text, "category": entity.category} for entity in entities_result.entities]
+
+        # Simple Summary (First Sentence)
+        summary = text_to_analyze.split('.')[0] + '.'
+
+        # Combine all results
+        response_data = {
+            "summary": summary,
+            "sentiment": sentiment,
+            "key_phrases": key_phrases,
+            "entities": entities
+        }
+
+        return jsonify(response_data)
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
     app.run(debug=True)
